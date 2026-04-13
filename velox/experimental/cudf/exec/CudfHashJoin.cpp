@@ -22,9 +22,11 @@
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstExpression.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
+#include "velox/experimental/cudf/expression/ExpressionTreeCompiler.h"
 
 #include "velox/core/PlanNode.h"
 #include "velox/exec/Task.h" // NOLINT(misc-unused-headers)
+#include "velox/expression/ExprOptimizer.h"
 #include "velox/type/TypeUtil.h"
 
 #include <cudf/aggregation.hpp>
@@ -421,17 +423,21 @@ CudfHashJoinProbe::CudfHashJoinProbe(
 
   // Setup filter in case it exists
   if (joinNode_->filter()) {
-    // simplify expression
-    exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
-    VELOX_CHECK_EQ(exprs.exprs().size(), 1);
+    // Fold constants at the TypedExpr level so that evaluator constructors
+    // see simple ConstantTypedExpr nodes.
+    auto filter = expression::optimize(
+        joinNode_->filter(),
+        operatorCtx_->execCtx()->queryCtx(),
+        operatorCtx_->pool());
 
     // Create a reusable evaluator for the filter column. This is expensive to
     // build, and the expression + input schema are stable for the lifetime of
-    // the operator instance.
+    // the operator instance.  Also collect the resolved boundary sub-expressions
+    // so we can pass them to createAstTree() below.
+    ResolvedSubExprs resolved;
     std::vector<velox::RowTypePtr> filterRowTypes{probeType_, buildType_};
-    filterEvaluator_ = createCudfExpression(
-        exprs.exprs()[0],
-        facebook::velox::type::concatRowTypes(filterRowTypes));
+    filterEvaluator_ = ExpressionTreeCompiler::compile(
+        filter, facebook::velox::type::concatRowTypes(filterRowTypes), resolved);
 
     // We don't need to get tables that contain conditional comparison columns
     // We'll pass the entire table. The ast will handle finding the required
@@ -442,22 +448,24 @@ CudfHashJoinProbe::CudfHashJoinProbe(
     // create ast tree
     if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
       createAstTree(
-          exprs.exprs()[0],
+          filter,
           tree_,
           scalars_,
           buildType_,
           probeType_,
           rightPrecomputeInstructions_,
-          leftPrecomputeInstructions_);
+          leftPrecomputeInstructions_,
+          resolved);
     } else {
       createAstTree(
-          exprs.exprs()[0],
+          filter,
           tree_,
           scalars_,
           probeType_,
           buildType_,
           leftPrecomputeInstructions_,
-          rightPrecomputeInstructions_);
+          rightPrecomputeInstructions_,
+          resolved);
     }
   }
 }

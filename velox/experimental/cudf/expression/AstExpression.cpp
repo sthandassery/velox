@@ -19,51 +19,54 @@
 #include "velox/experimental/cudf/expression/AstExpressionUtils.h"
 #include "velox/experimental/cudf/expression/AstPrinter.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
+#include "velox/experimental/cudf/expression/ExpressionEvaluatorRegistry.h"
 #include "velox/experimental/cudf/vector/TableViewPrinter.h"
 
-#include "velox/expression/ConstantExpr.h"
-#include "velox/expression/FieldReference.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/ConstantVector.h"
 
 namespace facebook::velox::cudf_velox {
 
-// Create tree from Expr
-// and collect precompute instructions for non-ast operations
 cudf::ast::expression const& createAstTree(
-    const std::shared_ptr<velox::exec::Expr>& expr,
+    const core::TypedExprPtr& expr,
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
     const RowTypePtr& inputRowSchema,
-    std::vector<PrecomputeInstruction>& precomputeInstructions) {
+    std::vector<PrecomputeInstruction>& precomputeInstructions,
+    const ResolvedSubExprs& resolvedSubExprs) {
   AstContext context{
-      tree, scalars, {inputRowSchema}, {precomputeInstructions}, expr};
+      tree, scalars, {inputRowSchema}, {precomputeInstructions}, expr,
+      resolvedSubExprs};
   return context.pushExprToTree(expr);
 }
 
 cudf::ast::expression const& createAstTree(
-    const std::shared_ptr<velox::exec::Expr>& expr,
+    const core::TypedExprPtr& expr,
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
     const RowTypePtr& leftRowSchema,
     const RowTypePtr& rightRowSchema,
     std::vector<PrecomputeInstruction>& leftPrecomputeInstructions,
-    std::vector<PrecomputeInstruction>& rightPrecomputeInstructions) {
+    std::vector<PrecomputeInstruction>& rightPrecomputeInstructions,
+    const ResolvedSubExprs& resolvedSubExprs) {
   AstContext context{
       tree,
       scalars,
       {leftRowSchema, rightRowSchema},
       {leftPrecomputeInstructions, rightPrecomputeInstructions},
-      expr};
+      expr,
+      resolvedSubExprs};
   return context.pushExprToTree(expr);
 }
 
 ASTExpression::ASTExpression(
-    std::shared_ptr<velox::exec::Expr> expr,
-    const RowTypePtr& inputRowSchema)
+    const core::TypedExprPtr& expr,
+    const RowTypePtr& inputRowSchema,
+    const ResolvedSubExprs& resolvedSubExprs)
     : expr_(expr), inputRowSchema_(inputRowSchema) {
   createAstTree(
-      expr, cudfTree_, scalars_, inputRowSchema, precomputeInstructions_);
+      expr, cudfTree_, scalars_, inputRowSchema, precomputeInstructions_,
+      resolvedSubExprs);
 }
 
 void ASTExpression::close() {
@@ -124,21 +127,21 @@ ColumnOrView ASTExpression::eval(
   return result;
 }
 
-bool ASTExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
-  return std::dynamic_pointer_cast<velox::exec::FieldReference>(expr) !=
-      nullptr ||
-      detail::isAstExprSupported(expr);
+bool ASTExpression::canEvaluate(const core::TypedExprPtr& expr) {
+  return isInputFieldReference(expr) || detail::isAstExprSupported(expr);
 }
 
 void registerAstEvaluator(int priority) {
   registerCudfExpressionEvaluator(
       kAstEvaluatorName,
       priority,
-      [](std::shared_ptr<velox::exec::Expr> expr) {
+      [](const core::TypedExprPtr& expr) {
         return ASTExpression::canEvaluate(expr);
       },
-      [](std::shared_ptr<velox::exec::Expr> expr, const RowTypePtr& row) {
-        return std::make_shared<ASTExpression>(std::move(expr), row);
+      [](const core::TypedExprPtr& expr,
+         const RowTypePtr& row,
+         const ResolvedSubExprs& resolved) {
+        return std::make_shared<ASTExpression>(expr, row, resolved);
       },
       /*overwrite=*/false);
 }
